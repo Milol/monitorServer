@@ -1,0 +1,289 @@
+package com.milo.util;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+
+import com.jcraft.jsch.*;
+
+public class LinuxStateForShell {
+	public static final String CPU_MEM_SHELL = "top -b -n 1";  
+    public static final String FILES_SHELL = "df -hl";  
+    public static final String[] COMMANDS = {CPU_MEM_SHELL, FILES_SHELL};  
+    public static final String LINE_SEPARATOR = System.getProperty("line.separator");  
+    public static Session session; 
+    
+    
+    /**
+     * 连接到制定的host
+     * @param user
+     * @param pwd
+     * @param host
+     * @return  是否连接成功
+     */
+    public static boolean connect(String user,String pwd,String host){
+    	JSch jsch=new JSch();
+    	try {
+			session=jsch.getSession(user, host,22);
+			session.setPassword(pwd);
+			
+			Properties config=new Properties();
+			config.put("StrictHostKeyChecking", "no");
+			session.setConfig(config);
+			
+			session.connect();
+		} catch (JSchException e) {
+			// TODO: handle exception
+			e.printStackTrace();
+			System.out.println("connect error!");
+			return false;
+		}
+    	
+    	return true;
+    }
+    
+    /** 
+     * 远程连接Linux 服务器 执行相关的命令 
+     * 
+     * @param commands 执行的脚本 
+     * @param user     远程连接的用户名 
+     * @param passwd   远程连接的密码 
+     * @param host     远程连接的主机IP 
+     * @return 最终命令返回信息 
+     */ 
+    public static Map<String,String> runDistanceShell(String[] commands,String user,String pwd,String host){
+    	if(!(connect(user, pwd, host))){
+    		return null;
+    	}
+    	Map<String,String> map=new HashMap<String,String>();
+    	StringBuilder stringBuilder;
+    	
+    	BufferedReader reader=null;
+    	Channel channel=null;
+    	try {
+			for(String command:commands){
+				stringBuilder =new StringBuilder();
+				channel =session.openChannel("exec");
+				((ChannelExec)channel).setCommand(command);
+				
+				channel.setInputStream(null);
+				((ChannelExec) channel).setErrStream(System.err);  
+				
+				channel.connect();
+				InputStream in=channel.getInputStream();
+				reader=new BufferedReader(new InputStreamReader(in));
+				String buf;
+				while ((buf=reader.readLine())!=null){
+					
+					//舍弃PID 进程信息
+					if(buf.contains("PID")){
+						break;
+					}
+					stringBuilder.append(buf.trim()).append(LINE_SEPARATOR);
+				}
+				//每个命令存储自己返回数据-用于后续对返回数据进行处理
+				map.put(command, stringBuilder.toString());
+			}
+		} catch (IOException | JSchException e) {  
+            e.printStackTrace();  
+        } finally {  
+            try {  
+                if (reader != null) {  
+                    reader.close();  
+                }  
+            } catch (IOException e) {  
+                e.printStackTrace();  
+            }  
+            if (channel != null) {  
+                channel.disconnect();  
+            }  
+            session.disconnect();  
+        }  
+        return map;
+    }
+    
+    /** 
+     * 直接在本地执行 shell 
+     * 
+     * @param commands 执行的脚本 
+     * @return 执行结果信息 
+     */  
+    public static Map<String, String> runLocalShell(String[] commands) {  
+        Runtime runtime = Runtime.getRuntime();  
+  
+        Map<String, String> map = new HashMap<>();  
+        StringBuilder stringBuffer;  
+  
+        BufferedReader reader;  
+        Process process;  
+        for (String command : commands) {  
+            stringBuffer = new StringBuilder();  
+            try {  
+                process = runtime.exec(command);  
+                InputStream inputStream = process.getInputStream();  
+                reader = new BufferedReader(new InputStreamReader(inputStream));  
+                String buf;  
+                while ((buf = reader.readLine()) != null) {  
+                    //舍弃PID 进程信息  
+                    if (buf.contains("PID")) {  
+                        break;  
+                    }  
+                    stringBuffer.append(buf.trim()).append(LINE_SEPARATOR);  
+                }  
+  
+            } catch (IOException e) {  
+                e.printStackTrace();  
+                return null;  
+            }  
+            //每个命令存储自己返回数据-用于后续对返回数据进行处理  
+            map.put(command, stringBuffer.toString());  
+        }  
+        return map;  
+    }
+    
+    /** 
+     * 处理 shell 返回的信息 
+     * <p> 
+     * 具体处理过程以服务器返回数据格式为准 
+     * 不同的Linux 版本返回信息格式不同 
+     * 
+     * @param result shell 返回的信息 
+     * @param diskName  应用所在的磁盘空间，即需要监控的磁盘空间，需要完整路径
+     * @return 最终处理后的信息 
+     */  
+    public static Map<String,String> disposeResultMessage(Map<String, String> result,String diskName) {  
+  
+        StringBuilder buffer = new StringBuilder();
+        Map<String,String> resMap=new HashMap<String, String>();
+        for (String command : COMMANDS) {  
+            String commandResult = result.get(command);  
+            if (null == commandResult) continue;  
+  
+            if (command.equals(CPU_MEM_SHELL)) {  
+                String[] strings = commandResult.split(LINE_SEPARATOR);  
+                //将返回结果按换行符分割  
+                for (String line : strings) {  
+                    line = line.toUpperCase();//转大写处理  
+  
+                    //处理CPU Cpu(s): 10.8%us,  0.9%sy,  0.0%ni, 87.6%id,  0.7%wa,  0.0%hi,  0.0%si,  0.0%st  
+                    if (line.startsWith("CPU(S):")) {  
+                        String cpuStr = "CPU 用户使用占有率:";  
+                        try {  
+                            cpuStr += line.split(":")[1].split(",")[0].replace("US", ""); 
+                            resMap.put("cupRate", line.split(":")[1].split(",")[0].replace("US", ""));
+                        } catch (Exception e) {  
+                            e.printStackTrace();  
+                            cpuStr += "计算过程出错";  
+                        }  
+                        buffer.append(cpuStr).append(LINE_SEPARATOR);  
+  
+                        //处理内存 Mem:  66100704k total, 65323404k used,   777300k free,    89940k buffers  
+                    } else if (line.startsWith("MEM")) {  
+                        String memStr = "内存使用情况:"; 
+                        try {  
+                            memStr += line.split(":")[1]  
+                                    .replace("TOTAL", "总计")  
+                                    .replace("USED", "已使用")  
+                                    .replace("FREE", "空闲")  
+                                    .replace("BUFFERS", "缓存");
+                            String[] mems=line.split(":")[1].split(",");
+                            String total=mems[0].replace("TOTAL", "").trim();
+                            String used=mems[1].replace("USED", "").trim();
+                            int memTotal=Integer.parseInt(total.substring(0,total.length()-1));
+                            int memUsed=Integer.parseInt(used.substring(0,used.length()-1));
+                            int memRate=memUsed*100/memTotal;
+                            resMap.put("memTotal", total);
+                            resMap.put("memUsed", used);
+                            resMap.put("memRate", memRate+"%");
+  
+                        } catch (Exception e) {  
+                            e.printStackTrace();  
+                            memStr += "计算过程出错";  
+                            buffer.append(memStr).append(LINE_SEPARATOR);  
+                            continue;  
+                        }  
+                        buffer.append(memStr).append(LINE_SEPARATOR);  
+  
+                    }  
+                }  
+            } else if (command.equals(FILES_SHELL)) {  
+                //处理系统磁盘状态  
+                buffer.append("系统磁盘状态:");  
+                try {  
+                	List<String> strs=disposeFilesSystem(commandResult,diskName);
+                	resMap.put("diskTotal", strs.get(0));
+                	resMap.put("diskUsed", strs.get(1));
+                	resMap.put("diskRate", strs.get(2));
+                } catch (Exception e) {  
+                    e.printStackTrace();  
+                    buffer.append("计算过程出错").append(LINE_SEPARATOR);  
+                }  
+            }  
+        }  
+        
+        
+        //return buffer.toString();  
+        return resMap;
+    } 
+    
+  //处理系统磁盘状态  
+    
+    /** 
+     * Filesystem            Size  Used Avail Use% Mounted on 
+     * /dev/sda3             442G  327G   93G  78% / 
+     * tmpfs                  32G     0   32G   0% /dev/shm 
+     * /dev/sda1             788M   60M  689M   8% /boot 
+     * /dev/md0              1.9T  483G  1.4T  26% /ezsonar 
+     * 
+     * @param commandResult 处理系统磁盘状态shell执行结果 
+     * @return 处理后的结果 
+     */  
+    public  static List<String> disposeFilesSystem(String commandResult,String diskName) { 
+        String[] strings = commandResult.split(LINE_SEPARATOR);
+        // final String PATTERN_TEMPLATE = "([a-zA-Z0-9%_/]*)\\s";  
+        String size = "";  
+        String used = "";  
+        String rate = "";
+        for (int i = 0; i <= strings.length - 1; i++) {  
+            if (i == 0) continue;
+            int temp = 0;  
+            String[] lineStrsBefore=strings[i].split(" ");
+            if(lineStrsBefore.length==1) continue;
+            String lineStr="";
+            for(String s:lineStrsBefore){
+            	if(!s.equals("")&&s.length()>0){
+            		if(lineStr.equals("")){
+            			lineStr+=s;
+            		}else {
+            			lineStr+=","+s;
+					}
+            	}
+            }
+            String[] lineStrs=lineStr.split(",");
+            if(lineStrs[lineStrs.length-1].equals(diskName)){
+            	rate=lineStrs[lineStrs.length-2];
+            	used=lineStrs[lineStrs.length-4];
+            	size=lineStrs[lineStrs.length-5];
+            }
+        }  
+        List<String> list=new ArrayList<String>();
+        list.add(size);
+        list.add(used);
+        list.add(rate);
+        return  list;
+    } 
+    
+    public static void main(String[] args) {  
+        Map<String, String> result = runDistanceShell(COMMANDS, "root", "pwd", "192.168.*.*");  
+        System.out.println(disposeResultMessage(result,"/")); 
+        
+        //runLocalShell(COMMANDS);  
+    }  
+    
+}
